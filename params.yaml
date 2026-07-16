@@ -1,0 +1,12 @@
+prompts:
+  n: 4000
+  seed: 1337
+  llm: qwen2.5:14b-instruct
+
+generate:
+  steps: 4          # FLUX.1-schnell is step-distilled; more is wasted time
+  size: 1024
+
+filter:
+  id_thresh: 0.55   # tighten to 0.6+ if the model alters bone structure
+  spearman_min: 0.85

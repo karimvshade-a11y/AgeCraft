@@ -1,0 +1,29 @@
+# Training config. Tuned for a single 12-24GB consumer card.
+
+pairs_file: data/processed/pairs.jsonl
+out_dir: weights
+device: null            # null -> auto-detect
+
+crop: 512               # fully-conv model: trains at 512, runs at any size
+batch_size: 4           # raise to 8 on 24GB
+num_workers: 6
+epochs: 60
+save_every: 5
+log_every: 50
+amp: true
+
+base_channels: 64       # 32 = ~4x faster, noticeably softer texture
+
+lr_g: 1.0e-4
+lr_d: 4.0e-4            # TTUR: discriminator learns faster, stabilises the GAN
+
+# 'lpips' converges faster and gives crisper pores, but see the licence warning
+# in train.py. 'none' = L1 + GAN only, unambiguous lineage. Ship-safe default.
+perceptual: none
+
+loss_weights:
+  l1: 1.0
+  perceptual: 0.5       # ignored when perceptual: none
+  adv: 0.05             # small -- this is a residual, the GAN only adds texture
+  identity_cycle: 2.0   # high on purpose: A->A must be exactly zero
+  delta_sparsity: 0.02  # prefer the smallest edit that works

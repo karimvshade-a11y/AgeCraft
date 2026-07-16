@@ -1,0 +1,93 @@
+[project]
+name = "agecraft"
+version = "0.1.0"
+description = "Local, private, delta-based face re-aging with per-region control"
+requires-python = ">=3.10"
+
+# Runtime deps ONLY -- what actually ships in the desktop app.
+# Keep this list boring and permissive. Every addition is a licence question.
+dependencies = [
+    "numpy>=1.24",
+    "pillow>=10.0",
+    "onnxruntime>=1.17",
+    "opencv-python-headless>=4.9",
+]
+
+# ---------------------------------------------------------------------------
+# EXTRAS ARE SPLIT BY *WHERE THEY RUN*, not by vague category.
+#
+# The pipeline does not run in one place:
+#   your Windows box  -> tests, maybe local training
+#   the rented GPU    -> FLUX generation, QC filtering
+#
+# Installing pod-only deps on your laptop drags in facenet-pytorch, which pins
+# torch<=2.3.0 and Pillow<10.3.0, and pip will happily downgrade a working
+# PyTorch install out from under you. Install only what the machine needs.
+# ---------------------------------------------------------------------------
+[project.optional-dependencies]
+
+# Run the test suite. Assumes torch/numpy/pillow are already present -- with a
+# working PyTorch you need nothing else.
+test = ["pytest>=8.0"]
+
+# Train the delta net. Deliberately minimal: training needs NO face models.
+# Works anywhere PyTorch works, including a 4GB 1650.
+train = [
+    "torch>=2.2",
+    "torchvision>=0.17",
+    "pyyaml>=6.0",
+]
+
+# Generate synthetic pairs with FLUX. GPU box only (12GB+ VRAM).
+generate = [
+    "torch>=2.2",
+    "diffusers>=0.30",
+    "transformers>=4.40",
+    "accelerate>=0.30",
+    "sentencepiece>=0.2",
+    "protobuf>=4.25",
+    "requests>=2.31",
+    "bitsandbytes>=0.43",
+]
+
+# QC filtering. GPU box only.
+#
+# WARNING: facenet-pytorch 2.6.0 declares:
+#     numpy<2.0.0 | Pillow<10.3.0 | torch<=2.3.0 | torchvision<=0.18.0
+# Those pins are stale, not real -- MTCNN and InceptionResnetV1 use ordinary
+# torch ops and run fine on current versions. But pip believes them and will
+# downgrade your stack. Install this extra with --no-deps:
+#
+#     pip install -e ".[filter]" --no-deps
+#     pip install transformers
+#
+# This is also the shakiest row in PROVENANCE.md (VGGFace2 weights, withdrawn
+# dataset). Two independent reasons to replace it eventually; the embedder is
+# behind a pluggable interface in filter_pairs.py precisely for that.
+filter = [
+    "facenet-pytorch>=2.5",
+    "transformers>=4.40",
+]
+
+# DVC pipeline / provenance trail.
+pipeline = ["dvc>=3.50"]
+
+# Prompt generation via Ollama (optional -- templates work without it).
+prompts = ["requests>=2.31"]
+
+dev = ["pytest>=8.0", "ruff>=0.4", "pip-licenses>=4.4"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 90
+target-version = "py310"

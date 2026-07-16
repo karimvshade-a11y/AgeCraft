@@ -69,6 +69,15 @@ facenet-pytorch's code is MIT, but its `vggface2` pretrained weights derive from
 the VGGFace2 dataset, which was research-licensed and has been withdrawn. This
 is the shakiest row in the ledger.
 
+It's also a dependency-hell package: its `setup.py` declares `torch<=2.3.0`,
+`torchvision<=0.18.0`, `numpy<2.0.0`, `Pillow<10.3.0`. Those pins are stale
+rather than real -- the library runs fine on current torch -- but pip believes
+them and will downgrade a working install. Always `pip install --no-deps
+facenet-pytorch`. Two independent reasons (licence + stale pins) to replace it;
+the embedder is behind a pluggable interface in `filter_pairs.py` for exactly
+this. A permissively-licensed ONNX embedder run through onnxruntime would kill
+both problems at once and drop a torch dependency from the QC stage.
+
 Both are behind a pluggable interface in `filter_pairs.py` for exactly this
 reason — swap in whatever counsel is comfortable with, and rerun `dvc repro`.
 
