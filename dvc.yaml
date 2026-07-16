@@ -1,0 +1,72 @@
+# The reproducible pipeline. `dvc repro` rebuilds everything from prompts up.
+#
+# This file IS the provenance trail. If you ever have to demonstrate that your
+# weights derive only from Apache-2.0 assets and prompts you authored, this
+# plus dvc.lock is the evidence. Do not run stages by hand and commit the
+# outputs -- that breaks the chain and the chain is the asset.
+
+stages:
+  prompts:
+    cmd: python -m agecraft.prompts.generate_prompts
+      --out data/prompts.jsonl
+      -n ${prompts.n}
+      --model ${prompts.llm}
+      --seed ${prompts.seed}
+    deps:
+      - src/agecraft/prompts/generate_prompts.py
+    params:
+      - prompts.n
+      - prompts.seed
+      - prompts.llm
+    outs:
+      - data/prompts.jsonl
+
+  generate:
+    cmd: python -m agecraft.data.generate_pairs
+      --prompts data/prompts.jsonl
+      --out data/raw
+      --steps ${generate.steps}
+      --size ${generate.size}
+    deps:
+      - data/prompts.jsonl
+      - src/agecraft/data/generate_pairs.py
+    params:
+      - generate.steps
+      - generate.size
+    outs:
+      - data/raw
+
+  filter:
+    cmd: python -m agecraft.data.filter_pairs
+      --raw data/raw
+      --out data/processed
+      --id-thresh ${filter.id_thresh}
+      --spearman-min ${filter.spearman_min}
+    deps:
+      - data/raw
+      - src/agecraft/data/filter_pairs.py
+    params:
+      - filter.id_thresh
+      - filter.spearman_min
+    outs:
+      - data/processed
+
+  train:
+    cmd: python -m agecraft.train --config configs/base.yaml
+    deps:
+      - data/processed/pairs.jsonl
+      - src/agecraft/train.py
+      - src/agecraft/models/fran.py
+      - src/agecraft/models/discriminator.py
+      - configs/base.yaml
+    outs:
+      - weights/last.pt
+
+  export:
+    cmd: python -m agecraft.export_onnx
+      --model weights/last.pt --out dist/agecraft.onnx
+    deps:
+      - weights/last.pt
+      - src/agecraft/export_onnx.py
+    outs:
+      - dist/agecraft.onnx
