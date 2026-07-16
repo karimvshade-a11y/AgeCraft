@@ -47,6 +47,20 @@ Everyone building in this space either doesn't notice, or notices and quits.
 under the non-commercial FLUX.1 [dev] licence. `generate_pairs.py` hardcodes
 schnell and there is a comment telling you not to swap it. Believe the comment.
 
+**The HF repo is gated; the licence is not.** Downloading schnell requires a HF
+account, accepting terms on the model page, and a read token. This is an access
+gate (email collection), *not* a licence restriction — BFL still publishes
+schnell under Apache 2.0 for personal, scientific, and commercial use. Clicking
+"Agree and access" does not encumber your outputs. Keep a dated screenshot of
+the model card's licence field with your records anyway; licences can change
+going forward, and what matters is the licence on the day you downloaded.
+
+**Possible upgrade path:** BFL's later FLUX.2 series includes *Klein*, also
+Apache 2.0. If it holds identity better under seed-locking it could raise the
+keep rate substantially. Same licence posture, so the provenance story is
+unchanged. Worth benchmarking once schnell's baseline keep rate is known —
+do not switch mid-dataset.
+
 **No identity adapter.** PuLID / InstantID / IP-Adapter FaceID would be the
 obvious way to hold identity across ages, but they depend on InsightFace
 `antelopev2`, which is non-commercial. We use seed-and-latent locking plus

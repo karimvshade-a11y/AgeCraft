@@ -47,6 +47,7 @@ REQUIRED = [
 def main() -> int:
     print(f"checking {ROOT}\n")
 
+    problems = 0
     missing = [f for f in REQUIRED if not (ROOT / f).exists()]
 
     # The specific failure mode: right filenames, wrong (flat) location.
@@ -63,6 +64,7 @@ def main() -> int:
         for name, should in flat:
             print(f"  {name:28s} should be at  {should}")
         print("\nFIX: re-download the repo ZIP and extract it, or move the files.")
+        problems += 1
 
     truly_missing = [f for f in missing if not (ROOT / Path(f).name).exists()]
     if truly_missing:
@@ -79,8 +81,44 @@ def main() -> int:
             elif f == "configs/base.yaml":
                 note = "  <-- the config for the full-quality model"
             print(f"  ✗ {f}{note}")
+        problems += 1
 
-    if missing:
+    # --- STALE DUPLICATES -------------------------------------------------
+    # Files that belong in a package but ALSO sit at the root. Python may
+    # import the wrong one, and if they came from an older download they're
+    # silently out of date. This is what let a broken repo reach GitHub.
+    pkg_names = {Path(f).name for f in REQUIRED if f.startswith("src/")}
+    dupes = [n for n in pkg_names
+             if (ROOT / n).exists() and n != "__init__.py"]
+    if dupes:
+        print("\nSTALE DUPLICATES at repo root (these shadow the real modules):")
+        for n in sorted(dupes):
+            print(f"  ⚠ {n}")
+        print("\nThese are leftovers from an older flat download. They are")
+        print("probably OUT OF DATE. Delete them:")
+        print("  " + " ".join(f"del {n}" for n in sorted(dupes)) + "   (Windows)")
+        print("  rm " + " ".join(sorted(dupes)) + "   (Linux)")
+        problems += 1
+
+    # --- GITIGNORE ANCHORING ----------------------------------------------
+    # `data/` (unanchored) matches src/agecraft/data/ at any depth and will
+    # silently drop a quarter of the package on push. Must be `/data/`.
+    gi = ROOT / ".gitignore"
+    if gi.exists():
+        bad = []
+        for line in gi.read_text().splitlines():
+            s = line.strip()
+            if s in ("data/", "weights/", "dist/", "data", "weights", "dist"):
+                bad.append(s)
+        if bad:
+            print("\nGITIGNORE BUG: unanchored patterns.")
+            for b in bad:
+                print(f"  ⚠ '{b}' also matches src/agecraft/{b.rstrip('/')}/ "
+                      f"-- use '/{b.rstrip('/')}/' instead")
+            print("\nThis silently excludes package code from git. Fix before pushing.")
+            problems += 1
+
+    if problems:
         print(f"\n{len(REQUIRED) - len(missing)}/{len(REQUIRED)} files present. NOT READY.")
         return 1
 

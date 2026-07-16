@@ -84,6 +84,43 @@ PY
 
 df -h /workspace | tail -1 | awk '{print "volume free: "$4}'
 
+# --- HF auth: FLUX.1-schnell is a GATED repo --------------------------------
+# The weights are Apache 2.0 (commercial use fine, see PROVENANCE.md) but BFL
+# put an access gate on the HF repo. You must accept the terms once in a
+# browser and supply a read token, or from_pretrained() 401s.
+#
+#   1. huggingface.co/black-forest-labs/FLUX.1-schnell -> "Agree and access"
+#   2. huggingface.co/settings/tokens -> New token -> Read
+#   3. export HF_TOKEN=hf_...
+#
+# Checked here, before the pipeline spins up, so you fail in 2 seconds instead
+# of after a long import on a paid clock.
+if [ -z "${HF_TOKEN:-}" ] && [ ! -f "$HF_HOME/token" ]; then
+  echo ""
+  echo "ERROR: no HuggingFace token."
+  echo "FLUX.1-schnell is gated. Accept the terms in a browser, then:"
+  echo "    export HF_TOKEN=hf_your_token_here"
+  echo "    bash scripts/runpod_setup.sh"
+  echo ""
+  echo "(The gate is an email wall, not a licence restriction --"
+  echo " schnell stays Apache 2.0 and commercially usable.)"
+  exit 1
+fi
+
+python - << 'PY'
+import os, sys
+from huggingface_hub import HfApi
+try:
+    HfApi().model_info("black-forest-labs/FLUX.1-schnell",
+                       token=os.environ.get("HF_TOKEN"))
+    print("HF auth OK, FLUX.1-schnell accessible ✓")
+except Exception as e:
+    print(f"HF ACCESS FAILED: {type(e).__name__}")
+    print("Did you click 'Agree and access repository' on the model page?")
+    print("A valid token is not enough -- the terms must be accepted too.")
+    sys.exit(1)
+PY
+
 export PYTHONPATH=/workspace/agecraft/src
 
 # --- stage 1: prompts (seconds, no GPU) ------------------------------------

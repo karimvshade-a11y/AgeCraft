@@ -2,10 +2,10 @@
 
 Two independent gates, both numeric, both logged:
 
-  1. IDENTITY GATE. Every frame in a sequence must embed close to the sequence
-     centroid. If FLUX drifted to a different person when we changed the age
-     phrase, the whole sequence dies. No partial credit -- a sequence with one
-     bad frame teaches the model that aging changes bone structure.
+  1. IDENTITY GATE (adjacent-chain). Consecutive frames (~15 years apart) must
+     stay above a cosine floor. Real drift breaks ONE link; legitimate ageing
+     does not. Do NOT gate on youngest-vs-oldest -- see check_sequence() for
+     why that measured 0.540 max and killed 94% of good data.
 
   2. AGE GATE. An age estimator must agree, monotonically, that the frames are
      ordered by age. If FLUX ignored "80 year old" and gave us a 45-year-old,
@@ -97,7 +97,26 @@ def check_sequence(rec: dict, ident: IdentityEmbedder, ager: AgeEstimator,
     ages = sorted(int(a) for a in rec["frames"])
     imgs = {a: Image.open(rec["frames"][str(a)]).convert("RGB") for a in ages}
 
-    # --- gate 1: identity
+    # --- gate 1: identity, measured on ADJACENT frames
+    #
+    # THIS WAS THE BIG BUG. v1 compared the youngest frame to the oldest and
+    # demanded cosine >= 0.55. Measured on 50 real sequences, that check had a
+    # MAXIMUM of 0.540 -- it never passed once, killing 47/50. It wasn't
+    # strict, it was impossible: FaceNet similarity between a person at 20 and
+    # the same person at 80 is genuinely ~0.29, because that is what ageing
+    # does to a face. The gate rejected sequences FOR AGEING SUCCESSFULLY.
+    #
+    # Endpoint sim isn't meaningless (measured r=+0.54 vs adjacent), it's
+    # miscalibrated -- it conflates drift with legitimate ageing and has no
+    # sane threshold across a 60-year gap.
+    #
+    # Adjacent frames are ~15 years apart, where recognition is reliable, and
+    # real drift shows up as ONE broken link in the chain. Measured on the same
+    # 50 sequences: min 0.264 | p10 0.444 | med 0.645 | max 0.849, with a clean
+    # gap at 0.50 separating 12 drifters from 36 good sequences.
+    #   >= 0.55 -> 72% keep   <- default, sits in the gap
+    #   >= 0.60 -> 58%        <- stricter, if the model morphs bone structure
+    #   >= 0.45 -> 80%        <- looser, more data, some drift
     embs = {}
     for a, im in imgs.items():
         e = ident.embed(im)
@@ -105,18 +124,22 @@ def check_sequence(rec: dict, ident: IdentityEmbedder, ager: AgeEstimator,
             return {"pass": False, "reason": f"no face detected at age {a}"}
         embs[a] = e
 
+    chain = [float(np.dot(embs[ages[i]], embs[ages[i + 1]]))
+             for i in range(len(ages) - 1)]
+    min_adj = min(chain)
+
+    # Reported for diagnostics only -- NEVER gated on. Kept because it's a
+    # useful signal of how much the face actually aged.
+    endpoint = float(np.dot(embs[ages[0]], embs[ages[-1]]))
     centroid = np.mean(list(embs.values()), axis=0)
     centroid /= np.linalg.norm(centroid) + 1e-8
-    sims = {a: float(np.dot(embs[a], centroid)) for a in ages}
-    worst = min(sims.values())
+    min_cen = min(float(np.dot(embs[a], centroid)) for a in ages)
 
-    # Also check the hardest pair directly (youngest vs oldest); centroid
-    # similarity can hide a slow drift across the sequence.
-    pair_sim = float(np.dot(embs[ages[0]], embs[ages[-1]]))
-
-    if worst < id_thresh or pair_sim < id_thresh:
+    if min_adj < id_thresh:
+        broken = ages[chain.index(min_adj)]
         return {"pass": False, "reason": "identity drift",
-                "worst_sim": worst, "endpoint_sim": pair_sim}
+                "min_adj": min_adj, "chain": chain, "endpoint": endpoint,
+                "min_centroid": min_cen, "broke_after_age": broken}
 
     # --- gate 2: age monotonicity
     est = {a: ager.estimate(im) for a, im in imgs.items()}
@@ -124,14 +147,15 @@ def check_sequence(rec: dict, ident: IdentityEmbedder, ager: AgeEstimator,
                    np.array([est[a] for a in ages]))
     if rho < spearman_min:
         return {"pass": False, "reason": "age not monotonic",
-                "spearman": rho, "estimated": est}
+                "spearman": rho, "estimated": est, "min_adj": min_adj}
 
     span = est[ages[-1]] - est[ages[0]]
-    if span < 25.0:  # asked for 20->80 and got less than 25 years of change
+    if span < 25.0:
         return {"pass": False, "reason": "insufficient age span",
-                "span": span, "estimated": est}
+                "span": span, "estimated": est, "min_adj": min_adj}
 
-    return {"pass": True, "worst_sim": worst, "endpoint_sim": pair_sim,
+    return {"pass": True, "min_adj": min_adj, "chain": chain,
+            "endpoint": endpoint, "min_centroid": min_cen,
             "spearman": rho, "span": span, "estimated": est}
 
 
@@ -153,9 +177,9 @@ def main() -> int:
     ap.add_argument("--raw", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--id-thresh", type=float, default=0.55,
-                    help="cosine sim floor; FaceNet/vggface2 same-person is "
-                         "typically >0.6. Raise it if the model learns to "
-                         "change bone structure.")
+                    help="MIN-ADJACENT cosine floor (NOT endpoint). Measured "
+                         "on 50 seqs: 0.45->80%% keep, 0.55->72%%, 0.60->58%%. "
+                         "Histogram gap sits at 0.50, so 0.55 is the default.")
     ap.add_argument("--spearman-min", type=float, default=0.85)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()

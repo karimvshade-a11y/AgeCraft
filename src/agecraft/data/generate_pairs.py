@@ -54,16 +54,37 @@ DEFAULT_ANCHORS = [20, 30, 40, 50, 60, 70, 80]
 
 # Age phrasing. Kept as an explicit table so the age signal is consistent and
 # auditable rather than whatever the LLM felt like that day.
+# MEASURED FINDING: keep these SHORT and about SKIN/HAIR ONLY.
+#
+# v1 used "full cheeks" at 20 and "hollow cheeks" at 80. Those are face-SHAPE
+# descriptors -- they change bone/fat geometry, so FLUX drew a genuinely
+# rounder or gaunter face and FaceNet correctly called it a different person.
+# The evidence was unmistakable in the adjacent-similarity chains:
+#     id_000039  [0.26, 0.59, 0.90, 0.91]
+#     id_000022  [0.35, 0.78, 0.87, 0.84]
+#     id_000020  [0.41, 0.73, 0.94, 0.96]
+# The 20->35 link breaks while 50->65->80 holds at 0.9+, because the older
+# phrases only described skin and hair. Shape language was the drift.
+#
+# Volume loss and sagging are real ageing signals we DO want the delta net to
+# learn -- but it learns them from pixels, not from us instructing FLUX to
+# redraw the skull. Let ageing emerge from skin/hair cues.
+#
+# LENGTH ALSO MATTERS: CLIP truncates at 77 tokens and the age phrase is
+# appended LAST, so it gets cut first. Observed in the v1 run:
+#     "truncated ... ['grey hair']"  "truncated ... ['white sparse hair']"
+# T5 still saw the full prompt so the signal survived, but CLIP's pooled
+# embedding lost it. Short phrases keep the age inside both encoders' windows.
 AGE_PHRASES = {
-    35: "a 35 year old, early expression lines, still firm skin",
-    65: "a 65 year old, deep set wrinkles, loose jawline, grey-white hair",
-    20: "a 20 year old, smooth unlined skin, full cheeks",
-    30: "a 30 year old, faint expression lines",
-    40: "a 40 year old, light forehead lines and nasolabial folds",
-    50: "a 50 year old, visible wrinkles, softening jawline, some grey hair",
-    60: "a 60 year old, deep wrinkles, loose skin, mostly grey hair",
-    70: "a 70 year old, heavily lined skin, sagging jowls, white hair, age spots",
-    80: "an 80 year old, deeply creased thin skin, hollow cheeks, white sparse hair",
+    20: "aged 20, smooth unlined skin",
+    30: "aged 30, faint expression lines",
+    35: "aged 35, faint expression lines",
+    40: "aged 40, light forehead lines",
+    50: "aged 50, visible wrinkles, some grey hair",
+    60: "aged 60, deep wrinkles, mostly grey hair",
+    65: "aged 65, deep wrinkles, grey-white hair",
+    70: "aged 70, heavily lined skin, white hair, age spots",
+    80: "aged 80, deeply creased thin skin, white sparse hair",
 }
 
 MODEL_ID = "black-forest-labs/FLUX.1-schnell"  # Apache 2.0. Do not swap for [dev].
@@ -148,15 +169,28 @@ def generate_sequence(pipe, spec: dict, out_dir: Path, steps: int, size: int,
                       anchors: list[int], dtype) -> dict:
     """Generate one identity across all age anchors, seed- and latent-locked.
 
-    The critical detail: we build the initial latent ONCE from the identity's
-    seed and reuse the identical tensor for every age. Passing a fresh
-    Generator per call is NOT equivalent -- diffusers advances generator state,
-    so ages would drift apart. Locking the latent is what makes the same face
-    come out the other side.
+    THE SEED LOCK: we build the initial latent ONCE from the identity's seed and
+    reuse the identical tensor for every age. Passing a fresh Generator per call
+    is NOT equivalent -- diffusers advances generator state, so ages would drift
+    to different people. Locking the latent is what makes the same face come out
+    the other side. Measured: 72% of sequences hold identity (min-adjacent
+    cosine >= 0.55) with no ID adapter at all.
+
+    THE BATCHING: all anchors go through ONE pipe call as a batch, sharing the
+    same repeated latent. This is not cosmetic -- with enable_model_cpu_offload()
+    the 23.8GB transformer crosses PCIe once per *call*, so per-image calls cost
+    ~33GB of transfers each and measured 17.4s/image (sys time was 44m of a 71m
+    run: that's bus traffic, not compute). Batching amortises one transfer over
+    all anchors. Mathematically identical output -- each batch row uses its own
+    latent row, and they're all copies of the same tensor.
     """
     ident = spec["id"]
     seq_dir = out_dir / ident
     seq_dir.mkdir(parents=True, exist_ok=True)
+
+    paths = {age: seq_dir / f"{age:03d}.png" for age in anchors}
+    if all(p.exists() for p in paths.values()):  # resumable
+        return {**spec, "frames": {str(a): str(p) for a, p in paths.items()}}
 
     # FLUX packs latents to 1/8 spatial with 16 channels.
     latent_h, latent_w = size // 8, size // 8
@@ -168,24 +202,20 @@ def generate_sequence(pipe, spec: dict, out_dir: Path, steps: int, size: int,
         1, (latent_h // 2) * (latent_w // 2), 64
     )
 
+    prompts = [compose(spec["prompt"], age) for age in anchors]
+    images = pipe(
+        prompt=prompts,
+        height=size,
+        width=size,
+        num_inference_steps=steps,       # schnell is distilled: 4 is enough
+        guidance_scale=0.0,              # schnell is guidance-distilled
+        latents=latents.repeat(len(anchors), 1, 1),  # <-- same lock, batched
+    ).images
+
     record = {**spec, "frames": {}}
-    for age in anchors:
-        path = seq_dir / f"{age:03d}.png"
-        if path.exists():  # resumable; free-tier sessions get killed at 12h
-            record["frames"][str(age)] = str(path)
-            continue
-
-        img = pipe(
-            prompt=compose(spec["prompt"], age),
-            height=size,
-            width=size,
-            num_inference_steps=steps,   # schnell is distilled: 4 is enough
-            guidance_scale=0.0,          # schnell is guidance-distilled
-            latents=latents.clone(),     # <-- the lock
-        ).images[0]
-        img.save(path)
-        record["frames"][str(age)] = str(path)
-
+    for age, img in zip(anchors, images):
+        img.save(paths[age])
+        record["frames"][str(age)] = str(paths[age])
     return record
 
 
