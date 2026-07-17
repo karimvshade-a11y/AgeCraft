@@ -1,0 +1,11 @@
+*.sh text eol=lf
+*.py text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.jsonl text eol=lf
+*.png binary
+*.pt binary
+*.onnx binary
+*.tgz binary
