@@ -1,3 +1,7 @@
+# NOTE: leading slashes are load-bearing.
+# A bare `data/` matches ANY directory named data at ANY depth -- including
+# src/agecraft/data/, which silently excludes a quarter of the package from
+# git. Anchor these to the repo root.
 /data/
 /weights/
 /dist/
