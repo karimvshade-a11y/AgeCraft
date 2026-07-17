@@ -35,7 +35,7 @@ SIZE="${SIZE:-768}"
 ANCHORS="${ANCHORS:-20,35,50,65,80}"
 MODE="${MODE:-offload}"
 QUANT="${QUANT:-}"
-HF_DATASET="${HF_DATASET:-}"
+HF_DATASET="${HF_DATASET:-Abdelkarim40/agecraft-data}"
 
 export HF_HOME=/workspace/hf
 export PYTHONUNBUFFERED=1
@@ -66,7 +66,7 @@ terminate_pod() {
     terminate_pod
 ) &
 WATCHDOG=$!
-log "watchdog armed: hard kill in ${MAX_HOURS}h (max loss ~\$$(echo "$MAX_HOURS * 0.35" | bc))"
+log "watchdog armed: hard kill in ${MAX_HOURS}h"
 
 # ---- deps ------------------------------------------------------------------
 pip install -q "diffusers>=0.30" "transformers>=4.40" "accelerate>=0.30" \

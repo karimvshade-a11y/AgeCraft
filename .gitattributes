@@ -1,10 +1,17 @@
+# Shell scripts MUST be LF. A .sh file with CRLF line endings fails on Linux
+# with "$'\r': command not found" -- a famously confusing error that costs real
+# money to debug on a metered GPU. Windows checkout must not touch these.
 *.sh text eol=lf
+
+# Python: LF everywhere. Avoids spurious whole-file diffs between machines.
 *.py text eol=lf
 *.yaml text eol=lf
 *.yml text eol=lf
 *.toml text eol=lf
 *.md text eol=lf
 *.jsonl text eol=lf
+
+# Binary -- never touch
 *.png binary
 *.pt binary
 *.onnx binary
