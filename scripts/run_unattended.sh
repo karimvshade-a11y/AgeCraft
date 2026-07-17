@@ -29,7 +29,7 @@
 
 set -uo pipefail
 
-MAX_HOURS="${MAX_HOURS:-8}"
+MAX_HOURS="${MAX_HOURS:-10}"
 LIMIT="${LIMIT:-1200}"
 SIZE="${SIZE:-768}"
 ANCHORS="${ANCHORS:-20,35,50,65,80}"
@@ -82,6 +82,18 @@ print(f'GPU: {p.name} {p.total_memory/1e9:.1f}GB')
 
 [ -z "${HF_TOKEN:-}" ] && { log "ERROR: no HF_TOKEN"; terminate_pod; exit 1; }
 
+# ---- PROVE UPLOAD WORKS BEFORE SPENDING ANYTHING ---------------------------
+python - << 'PY' || { log "UPLOAD TEST FAILED -- aborting before spending"; terminate_pod; exit 1; }
+import os
+from huggingface_hub import HfApi
+api = HfApi(token=os.environ["HF_TOKEN"])
+ds = os.environ.get("HF_DATASET","Abdelkarim40/agecraft-data")
+api.create_repo(ds, repo_type="dataset", private=True, exist_ok=True)
+api.upload_file(path_or_fileobj=b"ping", path_in_repo="ping.txt",
+                repo_id=ds, repo_type="dataset")
+print(f"upload test OK -> {ds}")
+PY
+
 # ---- the job ---------------------------------------------------------------
 run_job() {
     [ -f data/prompts.jsonl ] || \
@@ -96,6 +108,18 @@ run_job() {
         --prompts data/prompts.jsonl --out /workspace/data/raw \
         --limit "$LIMIT" --size "$SIZE" --steps 4 \
         --mode "$MODE" --dtype bf16 --anchors "$ANCHORS" "${qflag[@]}" || return 1
+
+    log "uploading RAW data (before filtering -- late failures cannot lose it)"
+    tar -czf /workspace/raw_backup.tgz -C /workspace/data raw
+    python - << 'PY' || log "raw upload failed (continuing)"
+import os
+from huggingface_hub import HfApi
+api = HfApi(token=os.environ["HF_TOKEN"])
+ds = os.environ.get("HF_DATASET","Abdelkarim40/agecraft-data")
+api.upload_file(path_or_fileobj="/workspace/raw_backup.tgz",
+                path_in_repo="raw_backup.tgz", repo_id=ds, repo_type="dataset")
+print("raw backup uploaded")
+PY
 
     log "filtering"
     python -m agecraft.data.filter_pairs \
