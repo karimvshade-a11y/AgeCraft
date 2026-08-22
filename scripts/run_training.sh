@@ -148,8 +148,11 @@ try:
     api = HfApi(token=tok)
     who = api.whoami()
     role = who.get("auth", {}).get("accessToken", {}).get("role")
+    # Reported for diagnosis only. This field's location has moved between
+    # huggingface_hub versions, so asserting on it would fail a perfectly good
+    # token on the wrong library version. The upload below is the real gate:
+    # if it succeeds, the token can write, whatever the metadata claims.
     print(f"authenticated as {who['name']}, role={role!r}")
-    assert role == "write", f"token role is {role!r}, needs to be 'write'"
     repo = os.environ["HF_MODEL"]
     api.create_repo(repo, repo_type="model", private=True, exist_ok=True)
     api.upload_file(path_or_fileobj=b"ok", path_in_repo="ping.txt",
