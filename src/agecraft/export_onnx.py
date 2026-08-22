@@ -44,6 +44,29 @@ def main() -> int:
 
     ck = torch.load(args.model, map_location="cpu")
     cfg = ck.get("cfg", {})
+
+    # A NaN here is worth naming precisely, because the two cases have very
+    # different prognoses. NaN in the learned weights means the training run is
+    # lost. NaN confined to BatchNorm running stats means the weights are fine
+    # and only the eval-mode statistics need recalibrating -- and it hides,
+    # because train() mode uses batch statistics and so the loss looks healthy
+    # right up until you export.
+    bad_w = [k for k, v in ck["G"].items()
+             if torch.is_floating_point(v) and "running_" not in k
+             and not torch.isfinite(v).all()]
+    bad_bn = [k for k, v in ck["G"].items()
+              if torch.is_floating_point(v) and "running_" in k
+              and not torch.isfinite(v).all()]
+    if bad_w:
+        print(f"ERROR: {len(bad_w)} weight tensors contain NaN/Inf, e.g. {bad_w[:3]}")
+        return 1
+    if bad_bn:
+        print(f"ERROR: {len(bad_bn)} BatchNorm running stats contain NaN/Inf, "
+              f"e.g. {bad_bn[:3]}")
+        print("The learned weights are intact. Recalibrate the statistics with "
+              "scripts/recalibrate_bn.py, then export again.")
+        return 1
+
     G = FRANGenerator(base=cfg.get("base_channels", 64))
     G.load_state_dict(ck["G"])
     G.eval()
@@ -82,6 +105,13 @@ def main() -> int:
         assert d.shape == img.shape, f"shape mismatch {d.shape} vs {img.shape}"
         print(f"verified at 384x640 -> delta {d.shape}, "
               f"range [{d.min():.3f}, {d.max():.3f}]")
+        if not np.isfinite(d).all():
+            # This check used to only print. A run once exported a model whose
+            # every output was NaN, said so on this line, and shipped anyway.
+            print("ERROR: exported model produces non-finite output. "
+                  "Not shipping this file.")
+            args.out.unlink(missing_ok=True)
+            return 1
     except ImportError:
         print("onnxruntime not installed; skipped verification")
 

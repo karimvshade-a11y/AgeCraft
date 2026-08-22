@@ -91,6 +91,18 @@ def main() -> int:
 
     w = cfg["loss_weights"]
     step = 0
+    nan_steps = 0
+
+    # BatchNorm running stats are updated by the forward pass, not by the
+    # optimiser -- so GradScaler skipping a step on non-finite gradients does
+    # NOT undo them. One fp16 overflow writes NaN into them permanently, and
+    # training then looks perfectly healthy (train() mode uses batch stats)
+    # right up until export, where eval() mode reads the poisoned stats and
+    # every output is NaN. Keep a last-known-good copy; they are only a few KB.
+    def bn_state():
+        return {k: v.clone() for k, v in G.state_dict().items() if "running_" in k}
+
+    bn_backup = bn_state()
     deadline = time.time() + args.max_seconds if args.max_seconds else None
 
     def save_ckpt(ep: int) -> None:
@@ -146,6 +158,12 @@ def main() -> int:
             scaler.step(optG)
             scaler.update()
 
+            if torch.isfinite(g_loss) and torch.isfinite(d_loss):
+                bn_backup = bn_state()
+            else:
+                G.load_state_dict(bn_backup, strict=False)
+                nan_steps += 1
+
             if step % cfg["log_every"] == 0:
                 print(f"e{epoch} s{step}  G {g_loss.item():.4f}  D {d_loss.item():.4f}  "
                       f"l1 {l1.item():.4f}  idc {idc.item():.5f}  "
@@ -164,7 +182,8 @@ def main() -> int:
         save_ckpt(epoch)
         if (epoch + 1) % cfg["save_every"] == 0:
             torch.save({"G": G.state_dict(), "cfg": cfg}, out / f"G_e{epoch:03d}.pt")
-        print(f"epoch {epoch} done in {time.time()-t0:.0f}s")
+        print(f"epoch {epoch} done in {time.time()-t0:.0f}s"
+              + (f"  [{nan_steps} non-finite steps rolled back so far]" if nan_steps else ""))
 
     return 0
 
