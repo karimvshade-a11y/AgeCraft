@@ -84,8 +84,20 @@ def main() -> int:
     start_epoch = 0
     if args.resume and args.resume.exists():
         ck = torch.load(args.resume, map_location=device)
-        G.load_state_dict(ck["G"]); D.load_state_dict(ck["D"])
-        optG.load_state_dict(ck["optG"]); optD.load_state_dict(ck["optD"])
+        G.load_state_dict(ck["G"])
+        optG.load_state_dict(ck["optG"])
+
+        # A checkpoint can carry a dead discriminator -- ours did. Restoring it
+        # would hand the new run the same frozen adversarial term it was saved
+        # with, so start D over instead. G keeps everything it learned; D is
+        # only a training aid and retrains quickly.
+        d_sick = any(not torch.isfinite(v).all() for v in ck["D"].values()
+                     if torch.is_floating_point(v))
+        if d_sick:
+            print("checkpoint's discriminator is non-finite -- reinitialising it")
+        else:
+            D.load_state_dict(ck["D"]); optD.load_state_dict(ck["optD"])
+
         start_epoch = ck["epoch"] + 1
         print(f"resumed from epoch {start_epoch}")
 
