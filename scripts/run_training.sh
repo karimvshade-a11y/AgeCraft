@@ -20,15 +20,20 @@
 # small balance workable: you are buying hours, not buying a finished model.
 #
 # COST
-#   RTX 4090 community cloud ~= $0.34/hr. MAX_HOURS is your maximum loss.
-#   MAX_HOURS=7 is about $2.40 of GPU plus a little disk.
+#   RTX 4090 community cloud ~= $0.34/hr, ~$0.35 with disk. MAX_HOURS is your
+#   maximum loss: MAX_HOURS=6 is about $2.10. Note the GPU list defaults to
+#   Secure cloud, where the same card is $0.74/hr -- filter to Community.
 #
 # USAGE
 #   export HF_TOKEN=hf_...        # WRITE token. A read token is what broke it before.
-#   export MAX_HOURS=7            # your maximum loss, in hours
+#   export MAX_HOURS=6            # your maximum loss, in hours
 #   cd /workspace/agecraft
-#   nohup bash scripts/run_training.sh > /workspace/train.log 2>&1 &
+#   setsid bash scripts/run_training.sh < /dev/null &
 #   # then close the browser. Losing your connection costs nothing.
+#
+# setsid, not nohup: RunPod's web terminal drops its session regularly, and it
+# took a nohup'd job down with it. The script writes its own log to LOG_FILE, so
+# there is no caller redirect to lose either.
 
 set -uo pipefail
 
@@ -63,8 +68,24 @@ log() { echo "[$(date -u +%H:%M:%S)] $*"; }
 HF_TOKEN="$(printf '%s' "${HF_TOKEN:-}" | tr -d '[:space:]')"
 export HF_TOKEN
 
+# Find an interpreter that can actually import torch. Do not assume `python`
+# exists: the June pod had python3 with no pip and the real one was python3.13,
+# and a missing interpreter fails every check below with a shell "not found"
+# that reads nothing like the real problem.
+PY_BIN=""
+for cand in python python3 python3.13 python3.12 python3.11 python3.10; do
+    command -v "$cand" >/dev/null 2>&1 || continue
+    "$cand" -c "import torch" >/dev/null 2>&1 || continue
+    PY_BIN="$cand"; break
+done
+if [ -z "$PY_BIN" ]; then
+    for cand in python python3; do
+        command -v "$cand" >/dev/null 2>&1 && { PY_BIN="$cand"; break; }
+    done
+fi
+
 push() {  # push <local file> <path in repo>
-    python scripts/hf_push.py --file "$1" --path-in-repo "$2" \
+    "$PY_BIN" scripts/hf_push.py --file "$1" --path-in-repo "$2" \
         --repo "$HF_MODEL" --repo-type model
 }
 
@@ -120,12 +141,15 @@ abort() {
 WATCHDOG=$!
 log "watchdog armed: hard kill in ${MAX_HOURS}h"
 
+[ -z "$PY_BIN" ] && abort "no python interpreter found on PATH"
+log "python: $PY_BIN -- $("$PY_BIN" --version 2>&1)"
+
 # ---- deps -------------------------------------------------------------------
 # onnxscript is not optional on torch >= 2.6: without it the ONNX export dies
 # at the very end of the run, after the GPU money is already spent.
-pip install -q "huggingface_hub>=0.23" pyyaml onnx onnxruntime onnxscript 2>&1 | tail -1
+"$PY_BIN" -m pip install -q "huggingface_hub>=0.23" pyyaml onnx onnxruntime onnxscript 2>&1 | tail -1
 
-python - << 'PY' || abort "GPU check failed -- see the traceback above"
+"$PY_BIN" - << 'PY' || abort "GPU check failed -- see the traceback above"
 import torch
 assert torch.cuda.is_available(), "NO CUDA -- wrong template"
 p = torch.cuda.get_device_properties(0)
@@ -137,7 +161,7 @@ PY
 # token was read-only and nobody found out until the run was already over.
 [ -z "${HF_TOKEN:-}" ] && abort "HF_TOKEN is empty after stripping whitespace"
 
-python - << 'PY' || abort "HF write test failed -- the token cannot save your work"
+"$PY_BIN" - << 'PY' || abort "HF write test failed -- the token cannot save your work"
 import os, traceback
 tok = os.environ["HF_TOKEN"]
 # Shape only, never the value: enough to tell "wrong token" from "no token"
@@ -164,11 +188,11 @@ except Exception:
 PY
 
 # ---- data -------------------------------------------------------------------
-python scripts/prepare_dataset.py --dataset "$HF_DATASET" --root "$DATA_ROOT" \
+"$PY_BIN" scripts/prepare_dataset.py --dataset "$HF_DATASET" --root "$DATA_ROOT" \
     || abort "dataset preparation failed"
 
 # ---- resume from wherever the last run stopped ------------------------------
-python - << 'PY'
+"$PY_BIN" - << 'PY'
 import os, shutil
 from pathlib import Path
 dest = Path(os.environ["WEIGHTS"]) / "last.pt"
@@ -213,7 +237,7 @@ RESUME=()
 [ -f "$WEIGHTS/last.pt" ] && RESUME=(--resume "$WEIGHTS/last.pt")
 
 log "training up to $(( TRAIN_SECONDS / 60 ))min (${RESERVE_MIN}min reserved for export+upload)"
-python -m agecraft.train --config "$CONFIG" --max-seconds "$TRAIN_SECONDS" "${RESUME[@]}"
+"$PY_BIN" -m agecraft.train --config "$CONFIG" --max-seconds "$TRAIN_SECONDS" "${RESUME[@]}"
 TRAIN_RC=$?
 log "training exited rc=$TRAIN_RC"
 
@@ -222,7 +246,7 @@ kill $UPLOADER 2>/dev/null
 # ---- export + LAYER 3: SAVE, THEN SELF-KILL ---------------------------------
 if [ -f "$WEIGHTS/last.pt" ]; then
     log "exporting ONNX"
-    python -m agecraft.export_onnx --model "$WEIGHTS/last.pt" \
+    "$PY_BIN" -m agecraft.export_onnx --model "$WEIGHTS/last.pt" \
         --out "$REPO_DIR/dist/agecraft.onnx" \
         || log "ONNX export failed -- weights are still safe, export locally later"
 else
