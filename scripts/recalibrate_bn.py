@@ -77,8 +77,18 @@ def main() -> int:
             for b in dl:
                 if seen >= args.batches:
                     break
-                G.reage(b["src"].to(device), b["src_age"].to(device),
-                        b["tgt_age"].to(device))
+                src = b["src"].to(device)
+                sa = b["src_age"].to(device)
+                ta = b["tgt_age"].to(device)
+                # Mirror the mixture the training loop actually fed these
+                # statistics: two ageing passes per step (one inside the
+                # discriminator step, one in the generator step) and one
+                # identity pass. Calibrating on ageing alone leaves a constant
+                # non-zero delta at src_age == tgt_age -- exactly the no-op the
+                # identity-cycle loss exists to guarantee.
+                G.reage(src, sa, ta)
+                G.reage(src, sa, ta)
+                G.reage(src, sa, sa)
                 seen += 1
                 if seen % 20 == 0:
                     print(f"  {seen}/{args.batches}")

@@ -103,6 +103,15 @@ def main() -> int:
         return {k: v.clone() for k, v in G.state_dict().items() if "running_" in k}
 
     bn_backup = bn_state()
+
+    # The discriminator has no running stats to protect, but its weights can
+    # diverge to NaN outright, and once they do it never recovers on its own:
+    # every D step is skipped by the scaler, so the NaN can never be trained
+    # away. Roll it back to the last healthy copy instead.
+    d_backup = {k: v.clone() for k, v in D.state_dict().items()}
+    d_resets = 0
+    d_bad_streak = 0
+
     deadline = time.time() + args.max_seconds if args.max_seconds else None
 
     def save_ckpt(ep: int) -> None:
@@ -134,12 +143,29 @@ def main() -> int:
             scaler.scale(d_loss).backward()
             scaler.step(optD)
 
+            # One cheap sync per step buys the health signal everything below
+            # depends on. A discriminator that has gone non-finite cannot train
+            # its way back -- the scaler skips every one of its steps forever.
+            d_ok = bool(torch.isfinite(d_loss))
+
             # ---------------- generator
             with torch.amp.autocast("cuda", enabled=cfg["amp"]):
                 fake, delta = G.reage(src, sa, ta)
 
                 l1 = F.l1_loss(fake, tgt)
-                adv = -D(fake, ta).mean()
+
+                # Skip the adversarial term outright while D is sick, rather
+                # than sanitising its value. Feeding NaN through D and cleaning
+                # up the number afterwards does not help: the backward pass
+                # still runs through D's NaN weights and hands NaN gradients to
+                # every parameter in G. The scaler then skips every generator
+                # step, and the run trains nothing while still paying for the
+                # GPU -- which is how a 32-epoch run yielded 12 epochs. Not
+                # calling D at all is the only thing that keeps the graph clean.
+                if d_ok:
+                    adv = -D(fake, ta).mean()
+                else:
+                    adv = torch.zeros((), device=device)
                 perc = P(fake, tgt).mean() if P is not None else torch.zeros((), device=device)
 
                 # identity-cycle: A -> A must be a no-op
@@ -154,15 +180,36 @@ def main() -> int:
                           + w["identity_cycle"] * idc + w["delta_sparsity"] * sparse)
 
             optG.zero_grad(set_to_none=True)
-            scaler.scale(g_loss).backward()
-            scaler.step(optG)
+            # Belt and braces over GradScaler. The scaler only skips a step
+            # when it finds non-finite GRADIENTS, and only when AMP is on --
+            # a fp32 run with a non-finite loss walks straight into the
+            # optimiser and overwrites every weight in G with NaN.
+            g_ok = bool(torch.isfinite(g_loss))
+            if g_ok:
+                scaler.scale(g_loss).backward()
+                scaler.step(optG)
             scaler.update()
 
-            if torch.isfinite(g_loss) and torch.isfinite(d_loss):
+            if g_ok and d_ok:
                 bn_backup = bn_state()
             else:
                 G.load_state_dict(bn_backup, strict=False)
                 nan_steps += 1
+
+            if d_ok:
+                d_bad_streak = 0
+                if step % 200 == 0:
+                    d_backup = {k: v.clone() for k, v in D.state_dict().items()}
+            else:
+                d_bad_streak += 1
+                if d_bad_streak >= 5:
+                    D.load_state_dict(d_backup)
+                    optD = torch.optim.AdamW(D.parameters(), lr=cfg["lr_d"],
+                                             betas=(0.5, 0.999))
+                    d_bad_streak = 0
+                    d_resets += 1
+                    print(f"discriminator went non-finite; rolled back and "
+                          f"reset its optimiser (reset #{d_resets})")
 
             if step % cfg["log_every"] == 0:
                 print(f"e{epoch} s{step}  G {g_loss.item():.4f}  D {d_loss.item():.4f}  "
@@ -183,7 +230,8 @@ def main() -> int:
         if (epoch + 1) % cfg["save_every"] == 0:
             torch.save({"G": G.state_dict(), "cfg": cfg}, out / f"G_e{epoch:03d}.pt")
         print(f"epoch {epoch} done in {time.time()-t0:.0f}s"
-              + (f"  [{nan_steps} non-finite steps rolled back so far]" if nan_steps else ""))
+              + (f"  [{nan_steps} non-finite steps, {d_resets} D rollbacks]"
+                 if (nan_steps or d_resets) else ""))
 
     return 0
 
