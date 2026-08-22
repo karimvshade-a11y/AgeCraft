@@ -35,6 +35,7 @@ set -uo pipefail
 MAX_HOURS="${MAX_HOURS:-7}"
 RESERVE_MIN="${RESERVE_MIN:-25}"        # held back for ONNX export + final upload
 CKPT_EVERY_MIN="${CKPT_EVERY_MIN:-30}"  # how much work you are willing to lose
+GRACE_MIN="${GRACE_MIN:-10}"            # pod stays up this long after a failed check
 CONFIG="${CONFIG:-configs/runpod4090.yaml}"
 REPO_DIR="${REPO_DIR:-/workspace/agecraft}"
 DATA_ROOT="${DATA_ROOT:-/workspace/data}"
@@ -50,7 +51,17 @@ export WEIGHTS="$REPO_DIR/weights"
 cd "$REPO_DIR"
 mkdir -p "$WEIGHTS"
 
+# Own the log from inside the script instead of relying on the caller's
+# redirect. A web terminal that dies must not take the record with it.
+exec >> "$LOG_FILE" 2>&1
+
 log() { echo "[$(date -u +%H:%M:%S)] $*"; }
+
+# A token pasted into a web form arrives with whatever whitespace came with it,
+# and a token with a stray newline fails exactly like a missing one while still
+# looking present to every "is it set?" check.
+HF_TOKEN="$(printf '%s' "${HF_TOKEN:-}" | tr -d '[:space:]')"
+export HF_TOKEN
 
 push() {  # push <local file> <path in repo>
     python scripts/hf_push.py --file "$1" --path-in-repo "$2" \
@@ -78,6 +89,24 @@ save_everything() {
     return 0
 }
 
+# Never terminate straight off a failed check. The first version of this script
+# did, and it took the only copy of the reason down with the machine -- which is
+# the same way the June data run was lost, just faster. Push the log if we can,
+# then hold the pod long enough for a human to read it. GRACE_MIN of 4090 time
+# costs cents; a silent death costs another whole debugging round trip.
+abort() {
+    log "ABORT: $*"
+    push "$LOG_FILE" "train.log" || log "(log upload failed too -- read it in the terminal)"
+    log "holding the pod ${GRACE_MIN}min so this log can be read, then terminating"
+    log "to keep it alive longer:  touch /workspace/HOLD"
+    for _ in $(seq "$GRACE_MIN"); do
+        [ -f /workspace/HOLD ] && { log "HOLD file present -- staying up, terminate manually"; return 1; }
+        sleep 60
+    done
+    terminate_pod
+    exit 1
+}
+
 # ---- LAYER 1: WATCHDOG ------------------------------------------------------
 # Hard deadline, independent of everything below. Fires even if training hangs,
 # the uploader dies, or the connection to you is long gone.
@@ -96,7 +125,7 @@ log "watchdog armed: hard kill in ${MAX_HOURS}h"
 # at the very end of the run, after the GPU money is already spent.
 pip install -q "huggingface_hub>=0.23" pyyaml onnx onnxruntime onnxscript 2>&1 | tail -1
 
-python - << 'PY' || { log "GPU CHECK FAILED"; terminate_pod; exit 1; }
+python - << 'PY' || abort "GPU check failed -- see the traceback above"
 import torch
 assert torch.cuda.is_available(), "NO CUDA -- wrong template"
 p = torch.cuda.get_device_properties(0)
@@ -106,25 +135,34 @@ PY
 # ---- PROVE WE CAN WRITE TO HF BEFORE SPENDING ANYTHING ----------------------
 # This is the exact check that failed silently last time, except last time the
 # token was read-only and nobody found out until the run was already over.
-[ -z "${HF_TOKEN:-}" ] && { log "ERROR: HF_TOKEN not set"; terminate_pod; exit 1; }
+[ -z "${HF_TOKEN:-}" ] && abort "HF_TOKEN is empty after stripping whitespace"
 
-python - << 'PY' || { log "HF WRITE TEST FAILED -- aborting before spending"; terminate_pod; exit 1; }
-import os
-from huggingface_hub import HfApi
-api = HfApi(token=os.environ["HF_TOKEN"])
-who = api.whoami()
-role = who.get("auth", {}).get("accessToken", {}).get("role")
-assert role == "write", f"token role is {role!r}, needs to be 'write'"
-repo = os.environ["HF_MODEL"]
-api.create_repo(repo, repo_type="model", private=True, exist_ok=True)
-api.upload_file(path_or_fileobj=b"ok", path_in_repo="ping.txt",
-                repo_id=repo, repo_type="model")
-print(f"HF write OK -> {repo}")
+python - << 'PY' || abort "HF write test failed -- the token cannot save your work"
+import os, traceback
+tok = os.environ["HF_TOKEN"]
+# Shape only, never the value: enough to tell "wrong token" from "no token"
+# from "token arrived mangled" without putting a credential in the log.
+print(f"token: {len(tok)} chars, starts {tok[:3]!r}")
+try:
+    from huggingface_hub import HfApi
+    api = HfApi(token=tok)
+    who = api.whoami()
+    role = who.get("auth", {}).get("accessToken", {}).get("role")
+    print(f"authenticated as {who['name']}, role={role!r}")
+    assert role == "write", f"token role is {role!r}, needs to be 'write'"
+    repo = os.environ["HF_MODEL"]
+    api.create_repo(repo, repo_type="model", private=True, exist_ok=True)
+    api.upload_file(path_or_fileobj=b"ok", path_in_repo="ping.txt",
+                    repo_id=repo, repo_type="model")
+    print(f"HF write OK -> {repo}")
+except Exception:
+    traceback.print_exc()
+    raise SystemExit(1)
 PY
 
 # ---- data -------------------------------------------------------------------
 python scripts/prepare_dataset.py --dataset "$HF_DATASET" --root "$DATA_ROOT" \
-    || { log "DATASET PREP FAILED"; terminate_pod; exit 1; }
+    || abort "dataset preparation failed"
 
 # ---- resume from wherever the last run stopped ------------------------------
 python - << 'PY'

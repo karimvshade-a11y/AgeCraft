@@ -58,10 +58,15 @@ export HF_TOKEN=
 Then launch:
 
 ```bash
-cd /workspace/agecraft && export MAX_HOURS=7 && nohup bash scripts/run_training.sh > /workspace/train.log 2>&1 &
+cd /workspace/agecraft && export MAX_HOURS=6 && setsid bash scripts/run_training.sh < /dev/null &
 ```
 
-`MAX_HOURS` is your maximum loss. 7 hours of a 4090 is about $2.40.
+`setsid`, not `nohup`: RunPod's web terminal drops its session fairly often, and
+a `nohup` job started from it still died with it. `setsid` puts the run in its
+own session so nothing the terminal does can reach it. The script writes its own
+log to `/workspace/train.log`, so there is no redirect to get wrong.
+
+`MAX_HOURS` is your maximum loss. 6 hours of a 4090 is about $2.10.
 
 Now you can close the browser. Losing power or connection costs nothing: the
 job holds its own deadline and kills its own machine.
@@ -78,9 +83,15 @@ tail -f /workspace/train.log
 ```
 
 - `GPU: NVIDIA GeForce RTX 4090 25.4GB` — right machine
+- `token: 37 chars, starts 'hf_'` then `authenticated as Abdelkarim40, role='write'`
 - `HF write OK -> Abdelkarim40/agecraft-weights` — the token can actually save
-  your work. **This is the check that failed silently last time.** If it fails,
-  the pod terminates itself in about 90 seconds having spent a few cents.
+  your work. **This is the check that failed silently in June.**
+
+If any check fails the run does **not** kill the pod immediately. It writes the
+reason to the log, tries to upload it, and holds the machine for `GRACE_MIN`
+(default 10) minutes so you can actually read it — because the first version of
+this script terminated instantly on failure and took the only copy of the reason
+with it. To keep a failed pod alive longer while you dig: `touch /workspace/HOLD`.
 - `17340 pairs across 867 identities` — the dataset came down and every path
   resolves
 - then `e0 s0 G ... D ... l1 ...` and it is training
