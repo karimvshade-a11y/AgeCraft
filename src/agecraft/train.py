@@ -60,6 +60,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", type=Path, required=True)
     ap.add_argument("--resume", type=Path, default=None)
+    ap.add_argument("--max-seconds", type=float, default=None,
+                    help="stop cleanly after this long, checkpointing first")
     args = ap.parse_args()
 
     cfg = yaml.safe_load(args.config.read_text())
@@ -89,6 +91,17 @@ def main() -> int:
 
     w = cfg["loss_weights"]
     step = 0
+    deadline = time.time() + args.max_seconds if args.max_seconds else None
+
+    def save_ckpt(ep: int) -> None:
+        # Written aside and moved into place: run_training.sh uploads last.pt
+        # while training continues, and a half-written file would ship as a
+        # corrupt checkpoint.
+        tmp = out / "last.pt.tmp"
+        torch.save({"G": G.state_dict(), "D": D.state_dict(),
+                    "optG": optG.state_dict(), "optD": optD.state_dict(),
+                    "epoch": ep, "cfg": cfg}, tmp)
+        tmp.replace(out / "last.pt")
 
     for epoch in range(start_epoch, cfg["epochs"]):
         G.train(); D.train()
@@ -139,10 +152,16 @@ def main() -> int:
                       f"|delta| {delta.abs().mean().item():.4f}")
             step += 1
 
-        torch.save({"G": G.state_dict(), "D": D.state_dict(),
-                    "optG": optG.state_dict(), "optD": optD.state_dict(),
-                    "epoch": epoch, "cfg": cfg},
-                   out / "last.pt")
+            if deadline is not None and time.time() > deadline:
+                # Resume picks up at epoch+1, so the tail of this epoch is
+                # dropped rather than replayed -- the data is shuffled, and it
+                # keeps loader state out of the checkpoint.
+                save_ckpt(epoch)
+                print(f"time budget reached in epoch {epoch} at step {step}; "
+                      f"checkpointed and stopping")
+                return 0
+
+        save_ckpt(epoch)
         if (epoch + 1) % cfg["save_every"] == 0:
             torch.save({"G": G.state_dict(), "cfg": cfg}, out / f"G_e{epoch:03d}.pt")
         print(f"epoch {epoch} done in {time.time()-t0:.0f}s")

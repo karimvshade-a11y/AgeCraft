@@ -1,0 +1,44 @@
+# Training config for a rented RTX 4090 on a fixed, small budget.
+#
+# WHY 256 AND NOT 512
+# -------------------
+# The net is fully convolutional, so the crop size decides how much context
+# each training sample carries -- not what resolution the finished model can
+# run at. Ageing is local texture: pores, creases, slack skin. 256px holds
+# plenty of it. Dropping 512 -> 256 cuts the cost of a step about 4x, which on
+# a three-dollar budget buys ~50 epochs instead of ~15. More passes over the
+# data beats a wider receptive field for this particular job.
+#
+# base_channels STAYS AT 64. That is the capacity that gives good skin texture,
+# and it is the one choice you cannot cheaply undo later without retraining
+# from scratch. Cut wall-clock elsewhere.
+#
+# epochs is deliberately far higher than will be reached: the wall clock is the
+# real limit, enforced by --max-seconds in run_training.sh. Whatever epoch the
+# budget stops at, the checkpoint on HuggingFace resumes from there next time.
+
+pairs_file: /workspace/data/processed/pairs.jsonl
+out_dir: /workspace/agecraft/weights
+device: null
+
+crop: 256
+batch_size: 8
+num_workers: 8
+epochs: 200
+save_every: 10
+log_every: 100
+amp: true
+
+base_channels: 64
+
+lr_g: 1.0e-4
+lr_d: 4.0e-4
+
+perceptual: none
+
+loss_weights:
+  l1: 1.0
+  perceptual: 0.5
+  adv: 0.05
+  identity_cycle: 2.0
+  delta_sparsity: 0.02
