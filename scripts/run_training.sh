@@ -121,7 +121,7 @@ abort() {
     log "holding the pod ${GRACE_MIN}min so this log can be read, then terminating"
     log "to keep it alive longer:  touch /workspace/HOLD"
     for _ in $(seq "$GRACE_MIN"); do
-        [ -f /workspace/HOLD ] && { log "HOLD file present -- staying up, terminate manually"; return 1; }
+        [ -f /workspace/HOLD ] && { log "HOLD file present -- staying up, terminate manually"; exit 1; }
         sleep 60
     done
     terminate_pod
@@ -149,9 +149,27 @@ log "python: $PY_BIN -- $("$PY_BIN" --version 2>&1)"
 # at the very end of the run, after the GPU money is already spent.
 "$PY_BIN" -m pip install -q "huggingface_hub>=0.23" pyyaml onnx onnxruntime onnxscript 2>&1 | tail -1
 
-"$PY_BIN" - << 'PY' || abort "GPU check failed -- see the traceback above"
+# Community hosts sometimes hand the GPU over a beat after the container starts.
+# Each attempt is a FRESH process on purpose: torch caches the result of a failed
+# CUDA init, so retrying inside one process only ever re-reads the first answer.
+gpu_ok() { "$PY_BIN" -c "import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; }
+for attempt in 1 2 3 4 5 6; do
+    gpu_ok && break
+    log "CUDA not ready (attempt $attempt/6), waiting 10s"
+    sleep 10
+done
+
+if ! gpu_ok; then
+    log "nvidia-smi says:"; nvidia-smi -L 2>&1 | head -3
+    "$PY_BIN" -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda)" 2>&1 | tail -1
+    # A GPU that nvidia-smi lists but CUDA cannot initialise is a broken host,
+    # not a broken template and not anything this script can fix. Say so plainly
+    # so the next move is "redeploy elsewhere" rather than another debug round.
+    abort "CUDA will not initialise on this host. If nvidia-smi lists a GPU above, the machine is faulty -- terminate and redeploy on a different one."
+fi
+
+"$PY_BIN" - << 'PY' || abort "GPU properties unreadable"
 import torch
-assert torch.cuda.is_available(), "NO CUDA -- wrong template"
 p = torch.cuda.get_device_properties(0)
 print(f"GPU: {p.name}  {p.total_memory/1e9:.1f}GB  bf16={p.major >= 8}")
 PY
